@@ -115,7 +115,7 @@ https://drive.google.com/drive/folders/1tMkD30DMYiKF0-wejuHDm6EZgWsSxsWx?usp=dri
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/Le68vi/PCB-DEFECT.git
+git clone https://github.com/Le68vi/PCB.git
 cd pcb-defect-detection
 
 ## Install dependencies

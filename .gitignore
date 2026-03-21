@@ -1,0 +1,13 @@
+#image yolov5 folder
+yolov5/
+#ignore model weights
+*.pt
+#ignore training ouputs
+runs/
+#python cache
+__pycache__/
+*.__pycache__
+#OS Files
+.Ds_store
+Thumbs.db
+

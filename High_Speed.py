@@ -1,120 +1,95 @@
+# PCB Prediction with Grad-CAM (Offline Images)
+
 import tensorflow as tf
 import numpy as np
 import cv2
-import time
+import os
+from tensorflow.keras.models import load_model
 
-# ==============================
-# PERFORMANCE SETTINGS
-# ==============================
-tf.config.threading.set_intra_op_parallelism_threads(0)
-tf.config.threading.set_inter_op_parallelism_threads(0)
 
-# ==============================
-# LOAD TFLITE MODEL
-# ==============================
-interpreter = tf.lite.Interpreter(
-    model_path="pcb_resnet_int8.tflite",
-    num_threads=4
-)
-interpreter.allocate_tensors()
+# LOAD TRAINED MODEL
+model_path = "P_res_50.h5"   #trained model
+model = load_model(model_path)
+print(f"Loaded model: {model_path}")
 
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
 
-# ==============================
 # CLASS LABELS
-# Adjust based on your training
-# ==============================
-class_names = ["Defect", "Pass"]   # index 0 = Defect, 1 = Pass
+class_names = ["Defect", "Pass"]  # index 0=Defect, 1=Pass
 
-# ==============================
-# PREPROCESS FUNCTION
-# ==============================
-def preprocess(frame):
-    img = cv2.resize(frame, (224, 224))
-    img = img.astype(np.float32) / 255.0
-    img = np.expand_dims(img, axis=0)
-    return img
+# IMAGE PREPROCESSING
+def preprocess(img):
+    img_resized = cv2.resize(img, (224, 224))
+    img_array = img_resized.astype(np.float32) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
+    return img_array
 
-# ==============================
-# INFERENCE FUNCTION
-# ==============================
-def infer(frame):
-    input_data = preprocess(frame)
-
-    interpreter.set_tensor(input_details[0]['index'], input_data)
-
-    start = time.time()
-    interpreter.invoke()
-    end = time.time()
-
-    output = interpreter.get_tensor(output_details[0]['index'])
-
-    inference_time = end - start
-    fps = 1 / inference_time if inference_time > 0 else 0
-
-    # Get predicted class
+# PREDICTION FUNCTION
+def infer(img):
+    input_data = preprocess(img)
+    output = model.predict(input_data, verbose=0)
     predicted_index = np.argmax(output)
     confidence = float(np.max(output))
-
     label = class_names[predicted_index]
+    return label, confidence, input_data
 
-    return label, confidence, inference_time, fps
+# GRAD-CAM FUNCTIONS
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name="conv5_block3_out"):
+    grad_model = tf.keras.models.Model(
+        [model.inputs],
+        [model.get_layer(last_conv_layer_name).output, model.output]
+    )
+    with tf.GradientTape() as tape:
+        conv_outputs, predictions = grad_model(img_array)
+        class_index = tf.argmax(predictions[0])
+        loss = predictions[:, class_index]
+
+    grads = tape.gradient(loss, conv_outputs)
+    pooled_grads = tf.reduce_mean(grads, axis=(0,1,2))
+
+    conv_outputs = conv_outputs[0]
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+    return heatmap.numpy()
+
+def overlay_heatmap(img, heatmap, alpha=0.4):
+    heatmap_resized = cv2.resize(heatmap, (img.shape[1], img.shape[0]))
+    heatmap_uint8 = np.uint8(255 * heatmap_resized)
+    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    superimposed_img = cv2.addWeighted(img, 1-alpha, heatmap_color, alpha, 0)
+    return superimposed_img
 
 
-# ==============================
-# START CAMERA
-# ==============================
-cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # Windows optimization
-
-if not cap.isOpened():
-    print("Error: Could not open camera.")
+# TEST FOLDER SETUP
+test_folder = "opp"  # Folder containing PCB images
+if not os.path.exists(test_folder):
+    print(f"Error: {test_folder} does not exist.")
     exit()
 
-print("Starting PCB Inspection System...")
-print("Press 'q' to quit.\n")
+# PROCESS ALL IMAGES
+for img_name in os.listdir(test_folder):
+    img_path = os.path.join(test_folder, img_name)
+    img = cv2.imread(img_path)
+    if img is None:
+        print(f"Warning: Could not read {img_name}, skipping.")
+        continue
 
-# ==============================
-# REAL-TIME LOOP
-# ==============================
-while True:
-    ret, frame = cap.read()
-    if not ret:
+    # Prediction
+    label, confidence, input_data = infer(img)
+
+    # Grad-CAM overlay
+    heatmap = make_gradcam_heatmap(input_data, model)
+    img_with_heatmap = overlay_heatmap(img, heatmap)
+
+    # Display results
+    print(f"{img_name}: {label} ({confidence:.2f})")
+    color = (0, 255, 0) if label == "Pass" else (0, 0, 255)
+    cv2.putText(img_with_heatmap, f"{label} ({confidence:.2f})",
+                (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+
+    cv2.imshow("PCB Prediction with Grad-CAM", img_with_heatmap)
+    if cv2.waitKey(500) & 0xFF == ord('q'):
         break
 
-    label, confidence, inf_time, fps = infer(frame)
-
-    # Print result in terminal
-    print(f"Result: {label} | Confidence: {confidence:.2f} | FPS: {fps:.2f}")
-
-    # Choose color based on result
-    if label == "Pass":
-        color = (0, 255, 0)  # Green
-    else:
-        color = (0, 0, 255)  # Red
-
-    # Display result on frame
-    cv2.putText(frame,
-                f"{label} ({confidence:.2f})",
-                (20, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                color,
-                3)
-
-    cv2.putText(frame,
-                f"FPS: {fps:.2f}",
-                (20, 90),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 0),
-                2)
-
-    # Show live feed
-    cv2.imshow("PCB Inspection - High Speed", frame)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
 cv2.destroyAllWindows()
+print("All images processed with Grad-CAM.")
